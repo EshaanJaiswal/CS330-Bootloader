@@ -16,12 +16,12 @@ static BootEntry menu_entries[MAX_MENU_ENTRIES] = {
     {
         L"Alpine Linux (Default)",
         L"Boot Alpine Linux kernel on serial ttyS0 console",
-        (CHAR8 *)"console=ttyS0 console=tty0 root=/dev/ram0 rw initrd=initramfs-virt"
+        (CHAR8 *)"console=ttyS0 console=tty0 root=/dev/ram0 rw quiet"
     },
     {
         L"Alpine Linux (Single User / Debug)",
         L"Boot into single-user emergency shell with debug logging",
-        (CHAR8 *)"console=ttyS0 console=tty0 root=/dev/ram0 single debug initrd=initramfs-virt"
+        (CHAR8 *)"console=ttyS0 console=tty0 root=/dev/ram0 rw single debug"
     },
     {
         L"Reboot System",
