@@ -5,41 +5,54 @@ static EFI_FILE_HANDLE root_dir = NULL;
 EFI_STATUS file_init(EFI_HANDLE image_handle)
 {
     EFI_STATUS status;
-    EFI_LOADED_IMAGE *loaded_image = NULL;
+    UINTN num_handles = 0;
+    EFI_HANDLE *handles = NULL;
 
-    /* Print debug step */
-    Print(L"  [debug] querying LoadedImage protocol on image_handle %p...\n", image_handle);
+    (void)image_handle;
 
-    /* OpenProtocol with EFI_OPEN_PROTOCOL_GET_PROTOCOL is the modern UEFI standard */
-    status = BS->OpenProtocol(
-        image_handle,
-        &LoadedImageProtocol,
-        (VOID **)&loaded_image,
-        image_handle,
+    /*
+     * Enumerate all filesystem handles on the system supporting SimpleFileSystemProtocol.
+     * This avoids device-handle ambiguity on virtual block devices (like QEMU's vvfat driver).
+     */
+    status = BS->LocateHandleBuffer(
+        ByProtocol,
+        &FileSystemProtocol,
         NULL,
-        EFI_OPEN_PROTOCOL_GET_PROTOCOL
+        &num_handles,
+        &handles
     );
 
-    if (EFI_ERROR(status)) {
-        Print(L"  [debug] OpenProtocol failed: %r (%lx)\n", status, status);
-        /* Fallback: try HandleProtocol directly */
-        status = BS->HandleProtocol(image_handle, &LoadedImageProtocol, (VOID **)&loaded_image);
-        if (EFI_ERROR(status)) {
-            Print(L"  [debug] HandleProtocol also failed: %r (%lx)\n", status, status);
-            return status;
-        }
-    }
-
-    Print(L"  [debug] LoadedImage ok. DeviceHandle: %p\n", loaded_image->DeviceHandle);
-
-    /* Open root filesystem using LibOpenRoot */
-    root_dir = LibOpenRoot(loaded_image->DeviceHandle);
-    if (!root_dir) {
-        Print(L"  [debug] LibOpenRoot returned NULL for DeviceHandle %p\n", loaded_image->DeviceHandle);
+    if (EFI_ERROR(status) || num_handles == 0) {
+        Print(L"  [file_init] No filesystem handles found: %r\n", status);
         return EFI_NOT_FOUND;
     }
 
-    Print(L"  [debug] LibOpenRoot succeeded! root_dir: %p\n", root_dir);
+    Print(L"  [file_init] Found %d filesystem handle(s).\n", num_handles);
+
+    /* Try to open root on each handle until we find our files */
+    for (UINTN i = 0; i < num_handles; i++) {
+        EFI_FILE_HANDLE root = LibOpenRoot(handles[i]);
+        if (root) {
+            EFI_FILE_HANDLE test_handle = NULL;
+            /* Check if this volume has our kernel */
+            status = root->Open(root, &test_handle, L"vmlinuz-virt", EFI_FILE_MODE_READ, 0);
+            if (!EFI_ERROR(status)) {
+                test_handle->Close(test_handle);
+                root_dir = root;
+                Print(L"  [file_init] ESP volume identified on handle %p!\n", handles[i]);
+                break;
+            }
+            root->Close(root);
+        }
+    }
+
+    FreePool(handles);
+
+    if (!root_dir) {
+        Print(L"  [file_init] Could not find ESP volume containing vmlinuz-virt.\n");
+        return EFI_NOT_FOUND;
+    }
+
     return EFI_SUCCESS;
 }
 
