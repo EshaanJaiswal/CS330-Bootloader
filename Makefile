@@ -43,7 +43,7 @@ run: all
 	qemu-system-x86_64 \
 		-bios $(OVMF) \
 		-drive file=fat:rw:$(ESP),format=raw \
-		-m 512M -net none -no-reboot \
+		-m 1024M -net none -no-reboot \
 		-serial stdio
 
 clean:

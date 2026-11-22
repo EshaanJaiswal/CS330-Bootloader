@@ -70,20 +70,25 @@ EFI_STATUS linux_boot(
         return EFI_INVALID_PARAMETER;
     }
 
-    /* 1. Allocate 2 pages (8192 bytes) for boot_params (struct is ~4.4KB) */
+    /* 1. Allocate boot_params (try standard real-mode 0x90000 first, or anywhere low) */
     UINTN bp_pages = (sizeof(struct boot_params) + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
-    EFI_PHYSICAL_ADDRESS bp_addr = 0x3fffffff;
-    status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, bp_pages, &bp_addr);
+    EFI_PHYSICAL_ADDRESS bp_addr = 0x90000;
+    status = BS->AllocatePages(AllocateAddress, EfiLoaderData, bp_pages, &bp_addr);
     if (EFI_ERROR(status)) {
-        status = BS->AllocatePages(AllocateAnyPages, EfiLoaderData, bp_pages, &bp_addr);
+        bp_addr = 0x0fffffff; /* Below 256MB */
+        status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, bp_pages, &bp_addr);
         if (EFI_ERROR(status)) {
-            Print(L"Failed to allocate memory for boot_params: %r\n", status);
-            return status;
+            status = BS->AllocatePages(AllocateAnyPages, EfiLoaderData, bp_pages, &bp_addr);
+            if (EFI_ERROR(status)) {
+                Print(L"Failed to allocate memory for boot_params: %r\n", status);
+                return status;
+            }
         }
     }
 
     struct boot_params *bp = (struct boot_params *)(UINTN)bp_addr;
     ZeroMem(bp, bp_pages * EFI_PAGE_SIZE);
+    Print(L"boot_params allocated at 0x%lx\n", bp_addr);
 
     /* 2. Read setup_header from kernel image */
     UINT8 *kbytes = (UINT8 *)kernel_buf;
@@ -134,12 +139,16 @@ EFI_STATUS linux_boot(
         while (cmdline[cmdlen]) cmdlen++;
         cmdlen++;
 
-        EFI_PHYSICAL_ADDRESS cmd_dest = 0x3fffffff;
+        EFI_PHYSICAL_ADDRESS cmd_dest = 0x0fffffff; /* Below 256MB */
         UINTN cmd_pages = (cmdlen + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
         status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, cmd_pages, &cmd_dest);
         if (EFI_ERROR(status)) {
-            Print(L"Failed to allocate memory for cmdline: %r\n", status);
-            return status;
+            cmd_dest = 0x3fffffff;
+            status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, cmd_pages, &cmd_dest);
+            if (EFI_ERROR(status)) {
+                Print(L"Failed to allocate memory for cmdline: %r\n", status);
+                return status;
+            }
         }
         CopyMem((VOID *)(UINTN)cmd_dest, cmdline, cmdlen);
         bp->hdr.cmd_line_ptr = (UINT32)cmd_dest;
@@ -147,15 +156,19 @@ EFI_STATUS linux_boot(
         Print(L"Command line placed at 0x%lx: \"%a\"\n", cmd_dest, cmdline);
     }
 
-    /* 5. Set up Initramfs */
+    /* 5. Set up Initramfs in clean middle RAM (below 256MB: <= 0x0fffffff) */
     if (initrd_buf && initrd_size > 0) {
         UINTN initrd_pages = (initrd_size + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
-        EFI_PHYSICAL_ADDRESS initrd_dest = orig_hdr->initrd_addr_max ? orig_hdr->initrd_addr_max : 0x3fffffff;
+        EFI_PHYSICAL_ADDRESS initrd_dest = 0x0fffffff; /* Below 256MB to avoid top-of-RAM collisions */
 
         status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, initrd_pages, &initrd_dest);
         if (EFI_ERROR(status)) {
-            Print(L"Failed to allocate memory for initrd: %r\n", status);
-            return status;
+            initrd_dest = 0x1fffffff; /* Fallback to 512MB */
+            status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, initrd_pages, &initrd_dest);
+            if (EFI_ERROR(status)) {
+                Print(L"Failed to allocate memory for initrd: %r\n", status);
+                return status;
+            }
         }
 
         ZeroMem((VOID *)(UINTN)initrd_dest, initrd_pages * EFI_PAGE_SIZE);
@@ -167,7 +180,7 @@ EFI_STATUS linux_boot(
         bp->ext_ramdisk_size = 0;
 
         UINT8 *dest_bytes = (UINT8 *)(UINTN)initrd_dest;
-        Print(L"Initramfs placed at 0x%lx (%d bytes, magic: %02x %02x %02x %02x)\n",
+        Print(L"Initramfs placed at 0x%lx (%d bytes, magic: %02X %02X %02X %02X)\n",
               initrd_dest, initrd_size,
               dest_bytes[0], dest_bytes[1], dest_bytes[2], dest_bytes[3]);
     }
