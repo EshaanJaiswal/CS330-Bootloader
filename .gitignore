@@ -7,10 +7,11 @@
 build/
 out/
 
-# Disk images
+# Disk images / generated EFI System Partition
 *.img
 *.iso
 *.fd
+esp/
 
 # OVMF firmware (downloaded locally)
 OVMF*.fd
