@@ -73,3 +73,4 @@ BOOLEAN console_wait_key_timeout(UINTN seconds, EFI_INPUT_KEY *out_key, void (*o
     }
     return FALSE;
 }
+

@@ -25,3 +25,4 @@ EFI_INPUT_KEY console_read_key(void);
 BOOLEAN console_wait_key_timeout(UINTN seconds, EFI_INPUT_KEY *out_key, void (*on_tick)(UINTN remaining));
 
 #endif /* CONSOLE_H */
+
