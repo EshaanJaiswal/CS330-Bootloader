@@ -7,18 +7,39 @@ EFI_STATUS file_init(EFI_HANDLE image_handle)
     EFI_STATUS status;
     EFI_LOADED_IMAGE *loaded_image = NULL;
 
-    /* 1. Retrieve LoadedImage protocol using gnu-efi's predefined LoadedImageProtocol GUID */
-    status = BS->HandleProtocol(image_handle, &LoadedImageProtocol, (VOID **)&loaded_image);
+    /* Print debug step */
+    Print(L"  [debug] querying LoadedImage protocol on image_handle %p...\n", image_handle);
+
+    /* OpenProtocol with EFI_OPEN_PROTOCOL_GET_PROTOCOL is the modern UEFI standard */
+    status = BS->OpenProtocol(
+        image_handle,
+        &LoadedImageProtocol,
+        (VOID **)&loaded_image,
+        image_handle,
+        NULL,
+        EFI_OPEN_PROTOCOL_GET_PROTOCOL
+    );
+
     if (EFI_ERROR(status)) {
-        return status;
+        Print(L"  [debug] OpenProtocol failed: %r (%lx)\n", status, status);
+        /* Fallback: try HandleProtocol directly */
+        status = BS->HandleProtocol(image_handle, &LoadedImageProtocol, (VOID **)&loaded_image);
+        if (EFI_ERROR(status)) {
+            Print(L"  [debug] HandleProtocol also failed: %r (%lx)\n", status, status);
+            return status;
+        }
     }
 
-    /* 2. Open the root directory of the device hosting our loaded image via LibOpenRoot */
+    Print(L"  [debug] LoadedImage ok. DeviceHandle: %p\n", loaded_image->DeviceHandle);
+
+    /* Open root filesystem using LibOpenRoot */
     root_dir = LibOpenRoot(loaded_image->DeviceHandle);
     if (!root_dir) {
+        Print(L"  [debug] LibOpenRoot returned NULL for DeviceHandle %p\n", loaded_image->DeviceHandle);
         return EFI_NOT_FOUND;
     }
 
+    Print(L"  [debug] LibOpenRoot succeeded! root_dir: %p\n", root_dir);
     return EFI_SUCCESS;
 }
 
