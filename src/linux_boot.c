@@ -70,130 +70,166 @@ EFI_STATUS linux_boot(
         return EFI_INVALID_PARAMETER;
     }
 
-    /* 1. Allocate boot_params anywhere below 1GB (avoid hardcoding 0x90000 EBDA conflict) */
+    /* ------------------------------------------------------------------ */
+    /* 1. Read setup_header from kernel image                               */
+    /* ------------------------------------------------------------------ */
+    UINT8 *kbytes = (UINT8 *)kernel_buf;
+    struct setup_header *orig_hdr = (struct setup_header *)(kbytes + 0x1f1);
+
+    UINT8 setup_sects = orig_hdr->setup_sects;
+    if (setup_sects == 0) {
+        setup_sects = 4;
+    }
+    UINTN setup_size  = (setup_sects + 1) * 512;
+    UINTN payload_size = kernel_size - setup_size;
+
+    Print(L"Linux kernel setup size: 0x%lx, payload size: 0x%lx\n",
+          setup_size, payload_size);
+
+    /* ------------------------------------------------------------------ */
+    /* 2. Allocate boot_params below 1 GB (must NOT be in EBDA 0x9xxxx)   */
+    /* ------------------------------------------------------------------ */
     UINTN bp_pages = (sizeof(struct boot_params) + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
     EFI_PHYSICAL_ADDRESS bp_addr = 0x3fffffff;
     status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, bp_pages, &bp_addr);
     if (EFI_ERROR(status)) {
         status = BS->AllocatePages(AllocateAnyPages, EfiLoaderData, bp_pages, &bp_addr);
         if (EFI_ERROR(status)) {
-            Print(L"Failed to allocate memory for boot_params: %r\n", status);
+            Print(L"Failed to allocate boot_params: %r\n", status);
             return status;
         }
     }
 
     struct boot_params *bp = (struct boot_params *)(UINTN)bp_addr;
-    ZeroMem(bp, bp_pages * EFI_PAGE_SIZE);
+    BS->SetMem(bp, bp_pages * EFI_PAGE_SIZE, 0);
     Print(L"boot_params allocated at 0x%lx\n", bp_addr);
 
-    /* 2. Read setup_header from kernel image */
-    UINT8 *kbytes = (UINT8 *)kernel_buf;
-    struct setup_header *orig_hdr = (struct setup_header *)(kbytes + 0x1f1);
+    /* Copy the setup_header from the kernel image */
+    BS->CopyMem(&bp->hdr, orig_hdr, sizeof(struct setup_header));
 
-    CopyMem(&bp->hdr, orig_hdr, sizeof(struct setup_header));
-
-    UINT8 setup_sects = orig_hdr->setup_sects;
-    if (setup_sects == 0) {
-        setup_sects = 4;
-    }
-    UINTN setup_size = (setup_sects + 1) * 512;
-    UINTN payload_size = kernel_size - setup_size;
-
-    Print(L"Linux kernel setup size: 0x%lx, payload size: 0x%lx\n", setup_size, payload_size);
-
-    /* 3. Allocate pages for the 64-bit protected-mode kernel payload */
+    /* ------------------------------------------------------------------ */
+    /* 3. Allocate and copy the kernel payload                              */
+    /*    pref_address is typically 0x1000000; fall back to below 1 GB     */
+    /* ------------------------------------------------------------------ */
     UINT64 pref_addr = orig_hdr->pref_address;
-    if (pref_addr == 0) {
-        pref_addr = 0x1000000;
-    }
+    if (pref_addr == 0) pref_addr = 0x1000000;
+
     UINT32 init_size = orig_hdr->init_size;
-    if (init_size < payload_size) {
-        init_size = payload_size;
+    if (init_size == 0 || init_size < (UINT32)payload_size) {
+        init_size = (UINT32)payload_size;
     }
 
     UINTN kernel_pages = (init_size + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
     EFI_PHYSICAL_ADDRESS kernel_dest = pref_addr;
 
-    status = BS->AllocatePages(AllocateAddress, EfiLoaderData, kernel_pages, &kernel_dest);
+    status = BS->AllocatePages(AllocateAddress, EfiLoaderData,
+                               kernel_pages, &kernel_dest);
     if (EFI_ERROR(status)) {
-        Print(L"Preferred address 0x%lx busy, allocating anywhere below 4GB...\n", pref_addr);
+        Print(L"Preferred address 0x%lx busy, allocating anywhere below 4GB...\n",
+              pref_addr);
         kernel_dest = 0x3fffffff;
-        status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, kernel_pages, &kernel_dest);
+        status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData,
+                                   kernel_pages, &kernel_dest);
         if (EFI_ERROR(status)) {
-            Print(L"Failed to allocate memory for kernel payload: %r\n", status);
+            Print(L"Failed to allocate kernel payload memory: %r\n", status);
             return status;
         }
     }
 
-    ZeroMem((VOID *)(UINTN)kernel_dest, kernel_pages * EFI_PAGE_SIZE);
-    CopyMem((VOID *)(UINTN)kernel_dest, kbytes + setup_size, payload_size);
+    BS->SetMem((VOID *)(UINTN)kernel_dest, kernel_pages * EFI_PAGE_SIZE, 0);
+    BS->CopyMem((VOID *)(UINTN)kernel_dest, kbytes + setup_size, payload_size);
     Print(L"Kernel payload copied to 0x%lx (%d pages)\n", kernel_dest, kernel_pages);
 
-    /* 4. Set up Command Line */
+    /* ------------------------------------------------------------------ */
+    /* 4. Kernel command line (must be below 4 GB, prefer below 1 GB)      */
+    /* ------------------------------------------------------------------ */
     if (cmdline) {
         UINTN cmdlen = 0;
         while (cmdline[cmdlen]) cmdlen++;
-        cmdlen++;
+        cmdlen++; /* include NUL terminator */
 
         EFI_PHYSICAL_ADDRESS cmd_dest = 0x3fffffff;
         UINTN cmd_pages = (cmdlen + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
-        status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, cmd_pages, &cmd_dest);
+        status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData,
+                                   cmd_pages, &cmd_dest);
         if (EFI_ERROR(status)) {
-            Print(L"Failed to allocate memory for cmdline: %r\n", status);
+            Print(L"Failed to allocate cmdline buffer: %r\n", status);
             return status;
         }
-        CopyMem((VOID *)(UINTN)cmd_dest, cmdline, cmdlen);
-        bp->hdr.cmd_line_ptr = (UINT32)cmd_dest;
-        bp->ext_cmd_line_ptr = 0;
+        BS->CopyMem((VOID *)(UINTN)cmd_dest, cmdline, cmdlen);
+        bp->hdr.cmd_line_ptr   = (UINT32)cmd_dest;
+        bp->ext_cmd_line_ptr   = (UINT32)((UINT64)cmd_dest >> 32);
         Print(L"Command line placed at 0x%lx: \"%a\"\n", cmd_dest, cmdline);
     }
 
-    /* 5. Set up Initramfs */
+    /* ------------------------------------------------------------------ */
+    /* 5. Initramfs — must be below initrd_addr_max (0x7fffffff for most)  */
+    /*    Place it at a fixed low address (128 MB) to avoid memblock clash  */
+    /* ------------------------------------------------------------------ */
     if (initrd_buf && initrd_size > 0) {
         UINTN initrd_pages = (initrd_size + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
-        EFI_PHYSICAL_ADDRESS initrd_dest = 0x1fffffff; /* Under 512MB */
 
-        status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, initrd_pages, &initrd_dest);
+        /*
+         * Try a fixed low address first (128 MB = 0x08000000).
+         * This is well below the kernel's preferred 0x1000000 load point
+         * and below the memblock waterline that overwrites high memory.
+         */
+        EFI_PHYSICAL_ADDRESS initrd_dest = 0x08000000;
+        status = BS->AllocatePages(AllocateAddress, EfiLoaderData,
+                                   initrd_pages, &initrd_dest);
         if (EFI_ERROR(status)) {
-            initrd_dest = 0x3fffffff;
-            status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, initrd_pages, &initrd_dest);
-            if (EFI_ERROR(status)) {
-                Print(L"Failed to allocate memory for initrd: %r\n", status);
-                return status;
-            }
+            /* Fall back: anywhere ≤ 256 MB */
+            initrd_dest = 0x0fffffff;
+            status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData,
+                                       initrd_pages, &initrd_dest);
+        }
+        if (EFI_ERROR(status)) {
+            /* Last resort: anywhere ≤ initrd_addr_max (0x7fffffff) */
+            initrd_dest = 0x7fffffff;
+            status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData,
+                                       initrd_pages, &initrd_dest);
+        }
+        if (EFI_ERROR(status)) {
+            Print(L"Failed to allocate initrd memory: %r\n", status);
+            return status;
         }
 
-        ZeroMem((VOID *)(UINTN)initrd_dest, initrd_pages * EFI_PAGE_SIZE);
-        CopyMem((VOID *)(UINTN)initrd_dest, initrd_buf, initrd_size);
+        BS->SetMem((VOID *)(UINTN)initrd_dest, initrd_pages * EFI_PAGE_SIZE, 0);
+        BS->CopyMem((VOID *)(UINTN)initrd_dest, initrd_buf, initrd_size);
 
-        bp->hdr.ramdisk_image = (UINT32)initrd_dest;
-        bp->hdr.ramdisk_size = (UINT32)initrd_size;
-        bp->ext_ramdisk_image = 0;
-        bp->ext_ramdisk_size = 0;
+        bp->hdr.ramdisk_image  = (UINT32)initrd_dest;
+        bp->hdr.ramdisk_size   = (UINT32)initrd_size;
+        bp->ext_ramdisk_image  = (UINT32)((UINT64)initrd_dest >> 32);
+        bp->ext_ramdisk_size   = (UINT32)((UINT64)initrd_size >> 32);
 
-        UINT8 *dest_bytes = (UINT8 *)(UINTN)initrd_dest;
+        UINT8 *db = (UINT8 *)(UINTN)initrd_dest;
         Print(L"Initramfs placed at 0x%lx (%d bytes, magic: %02X %02X %02X %02X)\n",
               initrd_dest, initrd_size,
-              dest_bytes[0], dest_bytes[1], dest_bytes[2], dest_bytes[3]);
+              db[0], db[1], db[2], db[3]);
     }
 
-    /* 6. Populate required loader fields */
-    bp->hdr.type_of_loader = 0xFF;
-    bp->hdr.loadflags |= 0x01;
-    bp->hdr.code32_start = (UINT32)kernel_dest;
+    /* ------------------------------------------------------------------ */
+    /* 6. Required loader fields in setup_header                            */
+    /* ------------------------------------------------------------------ */
+    bp->hdr.type_of_loader  = 0xFF;         /* custom bootloader */
+    bp->hdr.loadflags      |= 0x01;         /* LOADED_HIGH */
+    bp->hdr.loadflags      |= 0x80;         /* CAN_USE_HEAP */
+    bp->hdr.heap_end_ptr    = 0xFE00;       /* conventional heap limit */
+    bp->hdr.code32_start    = (UINT32)kernel_dest;
 
-    /* 7. Retrieve UEFI Memory Map and call ExitBootServices */
+    /* ------------------------------------------------------------------ */
+    /* 7. UEFI memory map + ExitBootServices                                */
+    /* ------------------------------------------------------------------ */
     Print(L"Preparing to ExitBootServices and hand over control...\n");
-    BS->Stall(1000000);
+    BS->Stall(500000); /* 0.5 s — let serial flush */
 
-    UINTN mmap_size = 0;
-    UINTN map_key = 0;
-    UINTN desc_size = 0;
+    UINTN mmap_size = 0, map_key = 0, desc_size = 0;
     UINT32 desc_ver = 0;
     EFI_MEMORY_DESCRIPTOR *mmap = NULL;
 
-    status = BS->GetMemoryMap(&mmap_size, mmap, &map_key, &desc_size, &desc_ver);
-    mmap_size += (4 * desc_size);
+    /* First call: get required buffer size */
+    BS->GetMemoryMap(&mmap_size, mmap, &map_key, &desc_size, &desc_ver);
+    mmap_size += 8 * desc_size; /* extra slack for the AllocatePool below */
 
     status = BS->AllocatePool(EfiLoaderData, mmap_size, (VOID **)&mmap);
     if (EFI_ERROR(status)) {
@@ -201,6 +237,7 @@ EFI_STATUS linux_boot(
         return status;
     }
 
+    /* Second call: fill the buffer */
     status = BS->GetMemoryMap(&mmap_size, mmap, &map_key, &desc_size, &desc_ver);
     if (EFI_ERROR(status)) {
         Print(L"Failed to get memory map: %r\n", status);
@@ -209,38 +246,43 @@ EFI_STATUS linux_boot(
 
     bp->e820_entries = build_e820_map(bp->e820_table, mmap, mmap_size, desc_size);
 
+    /* ExitBootServices — retry once if map key was stale */
     status = BS->ExitBootServices(image_handle, map_key);
     if (EFI_ERROR(status)) {
-        mmap_size += (4 * desc_size);
+        mmap_size += 8 * desc_size;
         BS->GetMemoryMap(&mmap_size, mmap, &map_key, &desc_size, &desc_ver);
         bp->e820_entries = build_e820_map(bp->e820_table, mmap, mmap_size, desc_size);
         status = BS->ExitBootServices(image_handle, map_key);
         if (EFI_ERROR(status)) {
+            /* Cannot print — boot services gone */
             return status;
         }
     }
 
-    /* 8. Jump to 64-bit kernel entry point (startup_64) */
+    /* ------------------------------------------------------------------ */
+    /* 8. Jump to 64-bit kernel entry (startup_64) at kernel_dest + 0x200  */
+    /*                                                                      */
+    /* Linux boot protocol (x86-64):                                        */
+    /*   %rsi = pointer to boot_params (zero page)                          */
+    /*   %rdi = 0  (not used by startup_64 but zero it for safety)          */
+    /*   %rsp = any valid stack pointer (we keep UEFI's stack)              */
+    /*   CS   = flat 64-bit code segment (already set by OVMF)              */
+    /*                                                                      */
+    /* DO NOT touch segment registers — they are already set up correctly   */
+    /* by OVMF. Zeroing %ss in particular causes an immediate triple fault. */
+    /* ------------------------------------------------------------------ */
     UINT64 kernel_entry = kernel_dest + 0x200;
 
     __asm__ __volatile__(
         "cli\n\t"
-        "xor %%rax, %%rax\n\t"
-        "mov %%rax, %%ds\n\t"
-        "mov %%rax, %%es\n\t"
-        "mov %%rax, %%fs\n\t"
-        "mov %%rax, %%gs\n\t"
-        "mov %%rax, %%ss\n\t"
-        "xor %%rax, %%rax\n\t"
-        "xor %%rbx, %%rbx\n\t"
-        "xor %%rbp, %%rbp\n\t"
-        "xor %%rdx, %%rdx\n\t"
-        "jmp *%%rcx\n\t"
+        "jmp *%0\n\t"
         :
-        : "c"(kernel_entry), "S"((UINT64)bp)
+        : "r"(kernel_entry),
+          "S"((UINT64)(UINTN)bp)   /* %rsi = boot_params */
         : "memory"
     );
 
+    /* Should never reach here */
     while (1) {
         __asm__ __volatile__("hlt");
     }
