@@ -16,12 +16,12 @@ static BootEntry menu_entries[MAX_MENU_ENTRIES] = {
     {
         L"Alpine Linux (Default)",
         L"Boot Alpine Linux kernel on serial ttyS0 console",
-        (CHAR8 *)"console=ttyS0 console=tty0 root=/dev/ram0 rw quiet"
+        (CHAR8 *)"earlyprintk=serial,ttyS0,115200 console=ttyS0 console=tty0 root=/dev/ram0 rw"
     },
     {
         L"Alpine Linux (Single User / Debug)",
         L"Boot into single-user emergency shell with debug logging",
-        (CHAR8 *)"console=ttyS0 console=tty0 root=/dev/ram0 rw single debug"
+        (CHAR8 *)"earlyprintk=serial,ttyS0,115200 console=ttyS0 console=tty0 root=/dev/ram0 rw single debug"
     },
     {
         L"Reboot System",
@@ -178,7 +178,6 @@ efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
         menu_entries[choice].cmdline
     );
 
-    /* If we get here, boot failed */
     console_set_color(EFI_LIGHTRED | EFI_BACKGROUND_BLACK);
     Print(L"\nFatal: linux_boot failed with status: %r\n", status);
     console_set_color(COLOR_NORMAL);

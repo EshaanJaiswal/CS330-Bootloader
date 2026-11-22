@@ -70,19 +70,15 @@ EFI_STATUS linux_boot(
         return EFI_INVALID_PARAMETER;
     }
 
-    /* 1. Allocate boot_params (try standard real-mode 0x90000 first, or anywhere low) */
+    /* 1. Allocate boot_params anywhere below 1GB (avoid hardcoding 0x90000 EBDA conflict) */
     UINTN bp_pages = (sizeof(struct boot_params) + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
-    EFI_PHYSICAL_ADDRESS bp_addr = 0x90000;
-    status = BS->AllocatePages(AllocateAddress, EfiLoaderData, bp_pages, &bp_addr);
+    EFI_PHYSICAL_ADDRESS bp_addr = 0x3fffffff;
+    status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, bp_pages, &bp_addr);
     if (EFI_ERROR(status)) {
-        bp_addr = 0x0fffffff; /* Below 256MB */
-        status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, bp_pages, &bp_addr);
+        status = BS->AllocatePages(AllocateAnyPages, EfiLoaderData, bp_pages, &bp_addr);
         if (EFI_ERROR(status)) {
-            status = BS->AllocatePages(AllocateAnyPages, EfiLoaderData, bp_pages, &bp_addr);
-            if (EFI_ERROR(status)) {
-                Print(L"Failed to allocate memory for boot_params: %r\n", status);
-                return status;
-            }
+            Print(L"Failed to allocate memory for boot_params: %r\n", status);
+            return status;
         }
     }
 
@@ -139,16 +135,12 @@ EFI_STATUS linux_boot(
         while (cmdline[cmdlen]) cmdlen++;
         cmdlen++;
 
-        EFI_PHYSICAL_ADDRESS cmd_dest = 0x0fffffff; /* Below 256MB */
+        EFI_PHYSICAL_ADDRESS cmd_dest = 0x3fffffff;
         UINTN cmd_pages = (cmdlen + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
         status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, cmd_pages, &cmd_dest);
         if (EFI_ERROR(status)) {
-            cmd_dest = 0x3fffffff;
-            status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, cmd_pages, &cmd_dest);
-            if (EFI_ERROR(status)) {
-                Print(L"Failed to allocate memory for cmdline: %r\n", status);
-                return status;
-            }
+            Print(L"Failed to allocate memory for cmdline: %r\n", status);
+            return status;
         }
         CopyMem((VOID *)(UINTN)cmd_dest, cmdline, cmdlen);
         bp->hdr.cmd_line_ptr = (UINT32)cmd_dest;
@@ -156,14 +148,14 @@ EFI_STATUS linux_boot(
         Print(L"Command line placed at 0x%lx: \"%a\"\n", cmd_dest, cmdline);
     }
 
-    /* 5. Set up Initramfs in clean middle RAM (below 256MB: <= 0x0fffffff) */
+    /* 5. Set up Initramfs */
     if (initrd_buf && initrd_size > 0) {
         UINTN initrd_pages = (initrd_size + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
-        EFI_PHYSICAL_ADDRESS initrd_dest = 0x0fffffff; /* Below 256MB to avoid top-of-RAM collisions */
+        EFI_PHYSICAL_ADDRESS initrd_dest = 0x1fffffff; /* Under 512MB */
 
         status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, initrd_pages, &initrd_dest);
         if (EFI_ERROR(status)) {
-            initrd_dest = 0x1fffffff; /* Fallback to 512MB */
+            initrd_dest = 0x3fffffff;
             status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, initrd_pages, &initrd_dest);
             if (EFI_ERROR(status)) {
                 Print(L"Failed to allocate memory for initrd: %r\n", status);
