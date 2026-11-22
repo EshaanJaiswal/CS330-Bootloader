@@ -62,7 +62,7 @@ struct setup_header {
     UINT32  handover_offset;    /* 0x264: UEFI handover entry offset */
 };
 
-/* The standard 4096-byte Linux boot_params (zero page) */
+/* The standard Linux boot_params (zero page) */
 struct boot_params {
     UINT8   screen_info[64];         /* 0x000 */
     UINT8   apm_bios_info[20];       /* 0x040 */
@@ -75,7 +75,10 @@ struct boot_params {
     UINT8   hd1_info[16];            /* 0x090 */
     UINT8   sys_desc_table[16];      /* 0x0a0 */
     UINT8   olpc_ofw_header[16];     /* 0x0b0 */
-    UINT8   _pad4[128];              /* 0x0c0 */
+    UINT32  ext_ramdisk_image;       /* 0x0c0 */
+    UINT32  ext_ramdisk_size;        /* 0x0c4 */
+    UINT32  ext_cmd_line_ptr;        /* 0x0c8 */
+    UINT8   _pad4[116];              /* 0x0cc */
     UINT8   edid_info[128];          /* 0x140 */
     UINT8   efi_info[32];            /* 0x1c0 */
     UINT32  alt_mem_k;               /* 0x1e0 */
@@ -98,14 +101,6 @@ struct boot_params {
 
 #pragma pack(pop)
 
-/*
- * High-level function to boot Linux.
- * 1. Prepares boot_params, loads kernel payload at preferred address (0x1000000).
- * 2. Prepares command line and initramfs.
- * 3. Retrieves memory map, translates to E820.
- * 4. Calls ExitBootServices.
- * 5. Jumps to kernel 64-bit entry point (kernel_base + 0x200).
- */
 EFI_STATUS linux_boot(
     EFI_HANDLE image_handle,
     VOID *kernel_buf,

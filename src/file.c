@@ -10,10 +10,6 @@ EFI_STATUS file_init(EFI_HANDLE image_handle)
 
     (void)image_handle;
 
-    /*
-     * Enumerate all filesystem handles on the system supporting SimpleFileSystemProtocol.
-     * This avoids device-handle ambiguity on virtual block devices (like QEMU's vvfat driver).
-     */
     status = BS->LocateHandleBuffer(
         ByProtocol,
         &FileSystemProtocol,
@@ -23,23 +19,17 @@ EFI_STATUS file_init(EFI_HANDLE image_handle)
     );
 
     if (EFI_ERROR(status) || num_handles == 0) {
-        Print(L"  [file_init] No filesystem handles found: %r\n", status);
         return EFI_NOT_FOUND;
     }
 
-    Print(L"  [file_init] Found %d filesystem handle(s).\n", num_handles);
-
-    /* Try to open root on each handle until we find our files */
     for (UINTN i = 0; i < num_handles; i++) {
         EFI_FILE_HANDLE root = LibOpenRoot(handles[i]);
         if (root) {
             EFI_FILE_HANDLE test_handle = NULL;
-            /* Check if this volume has our kernel */
             status = root->Open(root, &test_handle, L"vmlinuz-virt", EFI_FILE_MODE_READ, 0);
             if (!EFI_ERROR(status)) {
                 test_handle->Close(test_handle);
                 root_dir = root;
-                Print(L"  [file_init] ESP volume identified on handle %p!\n", handles[i]);
                 break;
             }
             root->Close(root);
@@ -49,7 +39,6 @@ EFI_STATUS file_init(EFI_HANDLE image_handle)
     FreePool(handles);
 
     if (!root_dir) {
-        Print(L"  [file_init] Could not find ESP volume containing vmlinuz-virt.\n");
         return EFI_NOT_FOUND;
     }
 
@@ -66,13 +55,13 @@ EFI_STATUS file_read(CHAR16 *path, VOID **buffer, UINTN *size)
         return EFI_INVALID_PARAMETER;
     }
 
-    /* 1. Open the file in read mode */
+    /* 1. Open file */
     status = root_dir->Open(root_dir, &file_handle, path, EFI_FILE_MODE_READ, 0);
     if (EFI_ERROR(status)) {
         return status;
     }
 
-    /* 2. Query file size via gnu-efi's LibFileInfo helper */
+    /* 2. Query file size */
     file_info = LibFileInfo(file_handle);
     if (!file_info) {
         file_handle->Close(file_handle);
@@ -82,25 +71,35 @@ EFI_STATUS file_read(CHAR16 *path, VOID **buffer, UINTN *size)
     UINTN file_size = file_info->FileSize;
     FreePool(file_info);
 
-    /* 3. Allocate memory buffer for file contents */
+    /* 3. Allocate buffer */
     status = BS->AllocatePool(EfiBootServicesData, file_size, buffer);
     if (EFI_ERROR(status)) {
         file_handle->Close(file_handle);
         return status;
     }
 
-    /* 4. Read file into buffer */
-    UINTN read_size = file_size;
-    status = file_handle->Read(file_handle, &read_size, *buffer);
-    file_handle->Close(file_handle);
+    /* 4. Read file in a loop until all bytes are transferred */
+    UINT8 *dest = (UINT8 *)*buffer;
+    UINTN total_read = 0;
 
-    if (EFI_ERROR(status)) {
-        BS->FreePool(*buffer);
-        *buffer = NULL;
-        return status;
+    while (total_read < file_size) {
+        UINTN chunk = file_size - total_read;
+        status = file_handle->Read(file_handle, &chunk, dest + total_read);
+        if (EFI_ERROR(status) || chunk == 0) {
+            break;
+        }
+        total_read += chunk;
     }
 
-    *size = read_size;
+    file_handle->Close(file_handle);
+
+    if (total_read != file_size) {
+        BS->FreePool(*buffer);
+        *buffer = NULL;
+        return EFI_DEVICE_ERROR;
+    }
+
+    *size = total_read;
     return EFI_SUCCESS;
 }
 

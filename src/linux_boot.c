@@ -1,6 +1,5 @@
 #include "linux_boot.h"
 
-/* Convert a single UEFI memory type to an E820 type */
 static UINT32 uefi_to_e820_type(UINT32 uefi_type)
 {
     switch (uefi_type) {
@@ -28,7 +27,6 @@ static UINT32 uefi_to_e820_type(UINT32 uefi_type)
     }
 }
 
-/* Build E820 table from UEFI memory map */
 static UINT8 build_e820_map(
     struct boot_e820_entry *e820_table,
     EFI_MEMORY_DESCRIPTOR *mmap,
@@ -43,7 +41,6 @@ static UINT8 build_e820_map(
         EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)(ptr + (i * desc_size));
         UINT32 e820_type = uefi_to_e820_type(desc->Type);
 
-        /* Merge with previous entry if consecutive and same type */
         if (count > 0 &&
             e820_table[count - 1].type == e820_type &&
             (e820_table[count - 1].addr + e820_table[count - 1].size) == desc->PhysicalStart) {
@@ -73,11 +70,12 @@ EFI_STATUS linux_boot(
         return EFI_INVALID_PARAMETER;
     }
 
-    /* 1. Allocate a page (4096 bytes) for boot_params */
-    EFI_PHYSICAL_ADDRESS bp_addr = 0x90000; /* Try low memory or anywhere below 4GB */
-    status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, 1, &bp_addr);
+    /* 1. Allocate 2 pages (8192 bytes) for boot_params (struct is ~4.4KB) */
+    UINTN bp_pages = (sizeof(struct boot_params) + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
+    EFI_PHYSICAL_ADDRESS bp_addr = 0x3fffffff;
+    status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, bp_pages, &bp_addr);
     if (EFI_ERROR(status)) {
-        status = BS->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &bp_addr);
+        status = BS->AllocatePages(AllocateAnyPages, EfiLoaderData, bp_pages, &bp_addr);
         if (EFI_ERROR(status)) {
             Print(L"Failed to allocate memory for boot_params: %r\n", status);
             return status;
@@ -85,13 +83,12 @@ EFI_STATUS linux_boot(
     }
 
     struct boot_params *bp = (struct boot_params *)(UINTN)bp_addr;
-    ZeroMem(bp, sizeof(struct boot_params));
+    ZeroMem(bp, bp_pages * EFI_PAGE_SIZE);
 
     /* 2. Read setup_header from kernel image */
     UINT8 *kbytes = (UINT8 *)kernel_buf;
     struct setup_header *orig_hdr = (struct setup_header *)(kbytes + 0x1f1);
 
-    /* Copy setup_header into boot_params */
     CopyMem(&bp->hdr, orig_hdr, sizeof(struct setup_header));
 
     UINT8 setup_sects = orig_hdr->setup_sects;
@@ -106,7 +103,7 @@ EFI_STATUS linux_boot(
     /* 3. Allocate pages for the 64-bit protected-mode kernel payload */
     UINT64 pref_addr = orig_hdr->pref_address;
     if (pref_addr == 0) {
-        pref_addr = 0x1000000; /* 16 MB fallback */
+        pref_addr = 0x1000000;
     }
     UINT32 init_size = orig_hdr->init_size;
     if (init_size < payload_size) {
@@ -116,7 +113,6 @@ EFI_STATUS linux_boot(
     UINTN kernel_pages = (init_size + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
     EFI_PHYSICAL_ADDRESS kernel_dest = pref_addr;
 
-    /* Try to allocate at the preferred address first */
     status = BS->AllocatePages(AllocateAddress, EfiLoaderData, kernel_pages, &kernel_dest);
     if (EFI_ERROR(status)) {
         Print(L"Preferred address 0x%lx busy, allocating anywhere below 4GB...\n", pref_addr);
@@ -136,7 +132,7 @@ EFI_STATUS linux_boot(
     if (cmdline) {
         UINTN cmdlen = 0;
         while (cmdline[cmdlen]) cmdlen++;
-        cmdlen++; /* include null terminator */
+        cmdlen++;
 
         EFI_PHYSICAL_ADDRESS cmd_dest = 0x3fffffff;
         UINTN cmd_pages = (cmdlen + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
@@ -147,6 +143,7 @@ EFI_STATUS linux_boot(
         }
         CopyMem((VOID *)(UINTN)cmd_dest, cmdline, cmdlen);
         bp->hdr.cmd_line_ptr = (UINT32)cmd_dest;
+        bp->ext_cmd_line_ptr = 0;
         Print(L"Command line placed at 0x%lx: \"%a\"\n", cmd_dest, cmdline);
     }
 
@@ -160,20 +157,29 @@ EFI_STATUS linux_boot(
             Print(L"Failed to allocate memory for initrd: %r\n", status);
             return status;
         }
+
+        ZeroMem((VOID *)(UINTN)initrd_dest, initrd_pages * EFI_PAGE_SIZE);
         CopyMem((VOID *)(UINTN)initrd_dest, initrd_buf, initrd_size);
+
         bp->hdr.ramdisk_image = (UINT32)initrd_dest;
         bp->hdr.ramdisk_size = (UINT32)initrd_size;
-        Print(L"Initramfs placed at 0x%lx (%d bytes)\n", initrd_dest, initrd_size);
+        bp->ext_ramdisk_image = 0;
+        bp->ext_ramdisk_size = 0;
+
+        UINT8 *dest_bytes = (UINT8 *)(UINTN)initrd_dest;
+        Print(L"Initramfs placed at 0x%lx (%d bytes, magic: %02x %02x %02x %02x)\n",
+              initrd_dest, initrd_size,
+              dest_bytes[0], dest_bytes[1], dest_bytes[2], dest_bytes[3]);
     }
 
     /* 6. Populate required loader fields */
-    bp->hdr.type_of_loader = 0xFF; /* Unregistered custom bootloader */
-    bp->hdr.loadflags |= 0x01;    /* LOADED_HIGH: kernel is loaded at/above 1MB */
+    bp->hdr.type_of_loader = 0xFF;
+    bp->hdr.loadflags |= 0x01;
     bp->hdr.code32_start = (UINT32)kernel_dest;
 
     /* 7. Retrieve UEFI Memory Map and call ExitBootServices */
     Print(L"Preparing to ExitBootServices and hand over control...\n");
-    BS->Stall(1000000); /* Brief 1-second pause to let the user see the console */
+    BS->Stall(1000000);
 
     UINTN mmap_size = 0;
     UINTN map_key = 0;
@@ -181,9 +187,8 @@ EFI_STATUS linux_boot(
     UINT32 desc_ver = 0;
     EFI_MEMORY_DESCRIPTOR *mmap = NULL;
 
-    /* First call to get required buffer size */
     status = BS->GetMemoryMap(&mmap_size, mmap, &map_key, &desc_size, &desc_ver);
-    mmap_size += (4 * desc_size); /* Extra headroom for allocation */
+    mmap_size += (4 * desc_size);
 
     status = BS->AllocatePool(EfiLoaderData, mmap_size, (VOID **)&mmap);
     if (EFI_ERROR(status)) {
@@ -191,20 +196,16 @@ EFI_STATUS linux_boot(
         return status;
     }
 
-    /* Second call to fetch actual memory map and fresh MapKey */
     status = BS->GetMemoryMap(&mmap_size, mmap, &map_key, &desc_size, &desc_ver);
     if (EFI_ERROR(status)) {
         Print(L"Failed to get memory map: %r\n", status);
         return status;
     }
 
-    /* Convert UEFI memory map to E820 table in boot_params */
     bp->e820_entries = build_e820_map(bp->e820_table, mmap, mmap_size, desc_size);
 
-    /* 8. ExitBootServices — must succeed without any intervening allocations */
     status = BS->ExitBootServices(image_handle, map_key);
     if (EFI_ERROR(status)) {
-        /* If it failed due to stale map_key, retry once */
         mmap_size += (4 * desc_size);
         BS->GetMemoryMap(&mmap_size, mmap, &map_key, &desc_size, &desc_ver);
         bp->e820_entries = build_e820_map(bp->e820_table, mmap, mmap_size, desc_size);
@@ -214,16 +215,7 @@ EFI_STATUS linux_boot(
         }
     }
 
-    /*
-     * =========================================================================
-     * AFTER THIS POINT: FIRMWARE SERVICES ARE DEAD. NO UEFI CALLS PERMITTED.
-     * =========================================================================
-     * Jump directly to 64-bit kernel entry point (kernel_dest + 0x200).
-     * Register conventions for Linux startup_64:
-     *   RSI = pointer to boot_params
-     *   RAX = 0, RBX = 0, RBP = 0, RDX = 0
-     *   DS, ES, FS, GS, SS = 0
-     */
+    /* 8. Jump to 64-bit kernel entry point (startup_64) */
     UINT64 kernel_entry = kernel_dest + 0x200;
 
     __asm__ __volatile__(
@@ -244,7 +236,6 @@ EFI_STATUS linux_boot(
         : "memory"
     );
 
-    /* Unreachable */
     while (1) {
         __asm__ __volatile__("hlt");
     }
