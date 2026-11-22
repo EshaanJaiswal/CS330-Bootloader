@@ -6,25 +6,20 @@ EFI_STATUS file_init(EFI_HANDLE image_handle)
 {
     EFI_STATUS status;
     EFI_LOADED_IMAGE *loaded_image = NULL;
-    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = NULL;
-    EFI_GUID loaded_image_guid = LOADED_IMAGE_PROTOCOL;
-    EFI_GUID fs_guid = SIMPLE_FILE_SYSTEM_PROTOCOL;
 
-    /* 1. Retrieve the LoadedImage protocol for our running image */
-    status = BS->HandleProtocol(image_handle, &loaded_image_guid, (VOID **)&loaded_image);
+    /* 1. Retrieve LoadedImage protocol using gnu-efi's predefined LoadedImageProtocol GUID */
+    status = BS->HandleProtocol(image_handle, &LoadedImageProtocol, (VOID **)&loaded_image);
     if (EFI_ERROR(status)) {
         return status;
     }
 
-    /* 2. Retrieve SimpleFileSystem from the device handle where we were loaded */
-    status = BS->HandleProtocol(loaded_image->DeviceHandle, &fs_guid, (VOID **)&fs);
-    if (EFI_ERROR(status)) {
-        return status;
+    /* 2. Open the root directory of the device hosting our loaded image via LibOpenRoot */
+    root_dir = LibOpenRoot(loaded_image->DeviceHandle);
+    if (!root_dir) {
+        return EFI_NOT_FOUND;
     }
 
-    /* 3. Open the root directory of this filesystem */
-    status = fs->OpenVolume(fs, &root_dir);
-    return status;
+    return EFI_SUCCESS;
 }
 
 EFI_STATUS file_read(CHAR16 *path, VOID **buffer, UINTN *size)
@@ -32,8 +27,6 @@ EFI_STATUS file_read(CHAR16 *path, VOID **buffer, UINTN *size)
     EFI_STATUS status;
     EFI_FILE_HANDLE file_handle = NULL;
     EFI_FILE_INFO *file_info = NULL;
-    UINTN info_size = 0;
-    EFI_GUID file_info_guid = EFI_FILE_INFO_ID;
 
     if (!root_dir || !path || !buffer || !size) {
         return EFI_INVALID_PARAMETER;
@@ -45,28 +38,15 @@ EFI_STATUS file_read(CHAR16 *path, VOID **buffer, UINTN *size)
         return status;
     }
 
-    /* 2. Query file size via GetInfo (first call returns required buffer size) */
-    status = file_handle->GetInfo(file_handle, &file_info_guid, &info_size, NULL);
-    if (status != EFI_BUFFER_TOO_SMALL) {
+    /* 2. Query file size via gnu-efi's LibFileInfo helper */
+    file_info = LibFileInfo(file_handle);
+    if (!file_info) {
         file_handle->Close(file_handle);
-        return status;
-    }
-
-    status = BS->AllocatePool(EfiBootServicesData, info_size, (VOID **)&file_info);
-    if (EFI_ERROR(status)) {
-        file_handle->Close(file_handle);
-        return status;
-    }
-
-    status = file_handle->GetInfo(file_handle, &file_info_guid, &info_size, file_info);
-    if (EFI_ERROR(status)) {
-        BS->FreePool(file_info);
-        file_handle->Close(file_handle);
-        return status;
+        return EFI_DEVICE_ERROR;
     }
 
     UINTN file_size = file_info->FileSize;
-    BS->FreePool(file_info);
+    FreePool(file_info);
 
     /* 3. Allocate memory buffer for file contents */
     status = BS->AllocatePool(EfiBootServicesData, file_size, buffer);
