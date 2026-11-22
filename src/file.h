@@ -17,3 +17,4 @@ EFI_STATUS file_read(CHAR16 *path, VOID **buffer, UINTN *size);
 void file_cleanup(void);
 
 #endif /* FILE_H */
+

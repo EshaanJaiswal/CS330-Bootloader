@@ -2,18 +2,32 @@
 #include <efilib.h>
 #include "console.h"
 #include "file.h"
+#include "linux_boot.h"
 
 #define MAX_MENU_ENTRIES 3
 
 typedef struct {
     CHAR16 *title;
     CHAR16 *description;
+    CHAR8  *cmdline;
 } BootEntry;
 
 static BootEntry menu_entries[MAX_MENU_ENTRIES] = {
-    { L"Alpine Linux (Default)",          L"Boot Linux kernel with standard options" },
-    { L"Alpine Linux (Recovery Console)",   L"Boot into single-user maintenance mode" },
-    { L"Reboot System",                    L"Reset system via UEFI Runtime Services" }
+    {
+        L"Alpine Linux (Default)",
+        L"Boot Alpine Linux kernel on serial ttyS0 console",
+        (CHAR8 *)"console=ttyS0 console=tty0 root=/dev/ram0 rw initrd=initramfs-virt"
+    },
+    {
+        L"Alpine Linux (Single User / Debug)",
+        L"Boot into single-user emergency shell with debug logging",
+        (CHAR8 *)"console=ttyS0 console=tty0 root=/dev/ram0 single debug initrd=initramfs-virt"
+    },
+    {
+        L"Reboot System",
+        L"Reset system via UEFI Runtime Services",
+        NULL
+    }
 };
 
 static void print_countdown_tick(UINTN remaining)
@@ -111,8 +125,8 @@ efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
         return EFI_SUCCESS;
     }
 
-    /* Phase 2: Test File System and Load Alpine binaries */
-    Print(L"Initializing UEFI SimpleFileSystemProtocol...\n");
+    /* 1. Mount ESP filesystem */
+    Print(L"Initializing UEFI FileSystem...\n");
     EFI_STATUS status = file_init(image_handle);
     if (EFI_ERROR(status)) {
         console_set_color(EFI_LIGHTRED | EFI_BACKGROUND_BLACK);
@@ -120,8 +134,8 @@ efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
         console_set_color(COLOR_NORMAL);
         return status;
     }
-    Print(L"Filesystem opened successfully.\n\n");
 
+    /* 2. Load Alpine Linux kernel from ESP */
     VOID *kernel_buf = NULL;
     UINTN kernel_size = 0;
     Print(L"Loading \\vmlinuz-virt from ESP...\n");
@@ -133,20 +147,9 @@ efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
         file_cleanup();
         return status;
     }
-    Print(L"Loaded kernel: %d bytes at address 0x%lx\n", kernel_size, (UINT64)kernel_buf);
+    Print(L"Loaded kernel: %d bytes (0x%lx)\n", kernel_size, (UINT64)kernel_buf);
 
-    /* Verify Linux boot header signature ('HdrS' = 0x53726448 at offset 0x202) */
-    UINT8 *hdr = (UINT8 *)kernel_buf;
-    if (kernel_size > 0x206 &&
-        hdr[0x202] == 'H' && hdr[0x203] == 'd' &&
-        hdr[0x204] == 'r' && hdr[0x205] == 'S') {
-        UINT16 boot_proto = *(UINT16 *)(hdr + 0x206);
-        console_set_color(COLOR_HIGHLIGHT);
-        Print(L"[OK] Valid Linux kernel detected! Boot protocol: v%x.%02x\n\n",
-              (boot_proto >> 8), (boot_proto & 0xFF));
-        console_set_color(COLOR_NORMAL);
-    }
-
+    /* 3. Load Alpine Linux initramfs from ESP */
     VOID *initrd_buf = NULL;
     UINTN initrd_size = 0;
     Print(L"Loading \\initramfs-virt from ESP...\n");
@@ -159,23 +162,30 @@ efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
         file_cleanup();
         return status;
     }
-    Print(L"Loaded initramfs: %d bytes at address 0x%lx\n\n", initrd_size, (UINT64)initrd_buf);
+    Print(L"Loaded initramfs: %d bytes (0x%lx)\n\n", initrd_size, (UINT64)initrd_buf);
 
     console_set_color(COLOR_HIGHLIGHT);
-    Print(L"Phase 2 Complete: Kernel and initramfs are in memory!\n");
+    Print(L"[Phase 3] Booting Linux kernel now...\n");
     console_set_color(COLOR_NORMAL);
-    Print(L"Ready for Phase 3: Setup boot_params & ExitBootServices handoff.\n");
-    Print(L"(Press any key to exit)\n");
 
-    EFI_INPUT_KEY k;
-    UINTN idx;
-    BS->WaitForEvent(1, &ST->ConIn->WaitForKey, &idx);
-    k = console_read_key();
-    (void)k;
+    /* 4. Hand off to Linux */
+    status = linux_boot(
+        image_handle,
+        kernel_buf,
+        kernel_size,
+        initrd_buf,
+        initrd_size,
+        menu_entries[choice].cmdline
+    );
+
+    /* If we get here, boot failed */
+    console_set_color(EFI_LIGHTRED | EFI_BACKGROUND_BLACK);
+    Print(L"\nFatal: linux_boot failed with status: %r\n", status);
+    console_set_color(COLOR_NORMAL);
 
     BS->FreePool(kernel_buf);
     BS->FreePool(initrd_buf);
     file_cleanup();
 
-    return EFI_SUCCESS;
+    return status;
 }

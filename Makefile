@@ -18,7 +18,7 @@ LIBS    := -L$(EFI_LIB) -lgnuefi -lefi
 ESP  := esp
 OVMF := /usr/share/ovmf/OVMF.fd
 
-OBJS := build/main.o build/console.o build/file.o
+OBJS := build/main.o build/console.o build/file.o build/linux_boot.o
 
 .PHONY: all run clean
 
@@ -43,7 +43,8 @@ run: all
 	qemu-system-x86_64 \
 		-bios $(OVMF) \
 		-drive file=fat:rw:$(ESP),format=raw \
-		-m 512M -net none -no-reboot
+		-m 512M -net none -no-reboot \
+		-serial stdio
 
 clean:
 	rm -rf build $(ESP)/EFI/BOOT/BOOTX64.EFI
