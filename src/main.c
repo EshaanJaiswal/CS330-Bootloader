@@ -12,16 +12,26 @@ typedef struct {
     CHAR8  *cmdline;
 } BootEntry;
 
+/*
+ * The ESP contains a full Alpine minirootfs (built by scripts/make_rootfs.sh)
+ * as alpine-rootfs.cpio.gz.  Stock initramfs-virt is only a bootstrap image
+ * that expects a separate ISO/squashfs root, so it is not used here.
+ * rdinit=/sbin/init starts BusyBox init, which spawns a getty on ttyS0.
+ *
+ * ttyS0 is last so it becomes /dev/console: kernel output and the login prompt
+ * work normally on the serial terminal, while tty0 remains available for a
+ * graphical terminal.
+ */
 static BootEntry menu_entries[MAX_MENU_ENTRIES] = {
     {
-        L"Alpine Linux (Default)",
-        L"Boot Alpine Linux kernel on serial ttyS0 console",
-        (CHAR8 *)"earlyprintk=serial,ttyS0,115200 console=ttyS0 console=tty0 root=/dev/ram0 rw"
+        L"Alpine Linux (Full userspace)",
+        L"Boot Alpine with a serial login prompt and working apk",
+        (CHAR8 *)"console=tty0 console=ttyS0 rdinit=/sbin/init video=efifb"
     },
     {
-        L"Alpine Linux (Single User / Debug)",
-        L"Boot into single-user emergency shell with debug logging",
-        (CHAR8 *)"earlyprintk=serial,ttyS0,115200 console=ttyS0 console=tty0 root=/dev/ram0 rw single debug"
+        L"Alpine Linux (Debug)",
+        L"Boot Alpine with kernel debug logging enabled",
+        (CHAR8 *)"console=tty0 console=ttyS0 rdinit=/sbin/init debug video=efifb"
     },
     {
         L"Reboot System",
@@ -149,20 +159,20 @@ efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
     }
     Print(L"Loaded kernel: %d bytes (0x%lx)\n", kernel_size, (UINT64)kernel_buf);
 
-    /* 3. Load Alpine Linux initramfs from ESP */
+    /* 3. Load the full Alpine root filesystem (cpio.gz initramfs) from ESP */
     VOID *initrd_buf = NULL;
     UINTN initrd_size = 0;
-    Print(L"Loading \\initramfs-virt from ESP...\n");
-    status = file_read(L"initramfs-virt", &initrd_buf, &initrd_size);
+    Print(L"Loading \\alpine-rootfs.cpio.gz from ESP...\n");
+    status = file_read(L"alpine-rootfs.cpio.gz", &initrd_buf, &initrd_size);
     if (EFI_ERROR(status)) {
         console_set_color(EFI_LIGHTRED | EFI_BACKGROUND_BLACK);
-        Print(L"Error loading initramfs: %r\n", status);
+        Print(L"Error loading rootfs: %r (run 'make rootfs')\n", status);
         console_set_color(COLOR_NORMAL);
         BS->FreePool(kernel_buf);
         file_cleanup();
         return status;
     }
-    Print(L"Loaded initramfs: %d bytes (0x%lx)\n\n", initrd_size, (UINT64)initrd_buf);
+    Print(L"Loaded rootfs: %d bytes (0x%lx)\n\n", initrd_size, (UINT64)initrd_buf);
 
     console_set_color(COLOR_HIGHLIGHT);
     Print(L"[Phase 3] Booting Linux kernel now...\n");

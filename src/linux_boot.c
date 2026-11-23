@@ -27,6 +27,105 @@ static UINT32 uefi_to_e820_type(UINT32 uefi_type)
     }
 }
 
+/*
+ * Forward the ACPI RSDP pointer from UEFI's configuration table into
+ * boot_params (offset 0x70).  Without this the kernel reports
+ * "A valid RSDP was not found" and disables ACPI under this boot protocol.
+ * Note that acpi_rsdp_addr must hold the pointer VALUE, not the bytes stored
+ * at that address.
+ */
+static void fill_acpi_rsdp(struct boot_params *bp)
+{
+    static EFI_GUID acpi20_guid = ACPI_20_TABLE_GUID;
+    static EFI_GUID acpi10_guid = ACPI_TABLE_GUID;
+    EFI_GUID *guids[2] = { &acpi20_guid, &acpi10_guid };
+
+    for (UINTN g = 0; g < 2; g++) {
+        for (UINTN i = 0; i < ST->NumberOfTableEntries; i++) {
+            EFI_CONFIGURATION_TABLE *entry = &ST->ConfigurationTable[i];
+            if (CompareGuid(&entry->VendorGuid, guids[g])) {
+                UINT64 rsdp_addr = (UINT64)(UINTN)entry->VendorTable;
+                BS->CopyMem(bp->acpi_rsdp_addr, &rsdp_addr, 8);
+                return;
+            }
+        }
+    }
+}
+
+/* Fill boot_params.screen_info from UEFI's Graphics Output Protocol.
+ * GRUB does this; without it the kernel sees no framebuffer and tty0 is only
+ * a dummy console, so nothing appears in QEMU's graphics window. */
+static void put16(UINT8 *p, UINT16 v) { p[0] = (UINT8)v; p[1] = (UINT8)(v >> 8); }
+static void put32(UINT8 *p, UINT32 v)
+{
+    p[0] = (UINT8)v; p[1] = (UINT8)(v >> 8);
+    p[2] = (UINT8)(v >> 16); p[3] = (UINT8)(v >> 24);
+}
+
+static void fill_screen_info(struct boot_params *bp)
+{
+    static EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info;
+    UINT8 *si = bp->screen_info;
+
+    if (EFI_ERROR(BS->LocateProtocol(&gop_guid, NULL, (VOID **)&gop)) ||
+        !gop || !gop->Mode || !gop->Mode->Info) {
+        return;
+    }
+    info = gop->Mode->Info;
+
+    /* VIDEO_TYPE_EFI makes the kernel use EFI framebuffer output instead of
+     * binding vgacon to the nonexistent legacy VGA text buffer. */
+    si[0x00] = 0;                                     /* orig_x */
+    si[0x01] = 0;                                     /* orig_y */
+    si[0x06] = 0;                                     /* orig_video_mode */
+    si[0x07] = 0;                                     /* orig_video_cols */
+    si[0x0e] = 0;                                     /* orig_video_lines */
+    si[0x0f] = 0x70;                                  /* VIDEO_TYPE_EFI */
+
+    put16(si + 0x12, (UINT16)info->HorizontalResolution);
+    put16(si + 0x14, (UINT16)info->VerticalResolution);
+    put16(si + 0x16, 32);                             /* lfb_depth */
+    put32(si + 0x18, (UINT32)gop->Mode->FrameBufferBase);
+    put32(si + 0x1c, (UINT32)gop->Mode->FrameBufferSize);
+    put16(si + 0x24, (UINT16)(info->PixelsPerScanLine * 4));
+
+    if (info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor) {
+        si[0x26] = 8; si[0x27] = 16;   /* red */
+        si[0x28] = 8; si[0x29] = 8;    /* green */
+        si[0x2a] = 8; si[0x2b] = 0;    /* blue */
+        si[0x2c] = 8; si[0x2d] = 24;   /* reserved */
+    }
+
+    Print(L"UEFI framebuffer: %dx%d @ 0x%lx\n",
+          info->HorizontalResolution, info->VerticalResolution,
+          (UINT64)gop->Mode->FrameBufferBase);
+}
+
+static void fill_efi_info(struct boot_params *bp,
+                          EFI_MEMORY_DESCRIPTOR *mmap,
+                          UINTN mmap_size,
+                          UINTN desc_size,
+                          UINT32 desc_ver)
+{
+    UINT8 *efi = bp->efi_info;
+    UINT64 systab = (UINT64)(UINTN)ST;
+    UINT64 memmap = (UINT64)(UINTN)mmap;
+
+    efi[0] = 'E';
+    efi[1] = 'F';
+    efi[2] = 'I';
+    efi[3] = '6';
+    put32(efi + 4, (UINT32)systab);
+    put32(efi + 8, (UINT32)desc_size);
+    put32(efi + 12, desc_ver);
+    put32(efi + 16, (UINT32)memmap);
+    put32(efi + 20, (UINT32)mmap_size);
+    put32(efi + 24, (UINT32)(systab >> 32));
+    put32(efi + 28, (UINT32)(memmap >> 32));
+}
+
 static UINT8 build_e820_map(
     struct boot_e820_entry *e820_table,
     EFI_MEMORY_DESCRIPTOR *mmap,
@@ -103,6 +202,12 @@ EFI_STATUS linux_boot(
     struct boot_params *bp = (struct boot_params *)(UINTN)bp_addr;
     BS->SetMem(bp, bp_pages * EFI_PAGE_SIZE, 0);
     Print(L"boot_params allocated at 0x%lx\n", bp_addr);
+
+    /* Pass UEFI's framebuffer to the kernel so QEMU's window shows the OS */
+    fill_screen_info(bp);
+
+    /* Forward firmware's ACPI RSDP so the kernel can find ACPI tables */
+    fill_acpi_rsdp(bp);
 
     /* Copy the setup_header from the kernel image */
     BS->CopyMem(&bp->hdr, orig_hdr, sizeof(struct setup_header));
@@ -245,16 +350,38 @@ EFI_STATUS linux_boot(
     }
 
     bp->e820_entries = build_e820_map(bp->e820_table, mmap, mmap_size, desc_size);
+    fill_efi_info(bp, mmap, mmap_size, desc_size, desc_ver);
 
-    /* ExitBootServices — retry once if map key was stale */
+    /* ExitBootServices — retry once if map key was stale.
+     * IMPORTANT: no allocations (not even Print) between GetMemoryMap and EBS. */
     status = BS->ExitBootServices(image_handle, map_key);
     if (EFI_ERROR(status)) {
-        mmap_size += 8 * desc_size;
+        /* ExitBootServices can invalidate the map key after the first call.
+         * Reacquire and rebuild the map before retrying, without using stale
+         * map buffers or map keys. */
+        BS->FreePool(mmap);
+        mmap = NULL;
+
+        mmap_size = 0;
         BS->GetMemoryMap(&mmap_size, mmap, &map_key, &desc_size, &desc_ver);
+        mmap_size += 8 * desc_size;
+
+        status = BS->AllocatePool(EfiLoaderData, mmap_size, (VOID **)&mmap);
+        if (EFI_ERROR(status)) {
+            return status;
+        }
+
+        status = BS->GetMemoryMap(&mmap_size, mmap, &map_key, &desc_size, &desc_ver);
+        if (EFI_ERROR(status)) {
+            BS->FreePool(mmap);
+            return status;
+        }
+
         bp->e820_entries = build_e820_map(bp->e820_table, mmap, mmap_size, desc_size);
+        fill_efi_info(bp, mmap, mmap_size, desc_size, desc_ver);
         status = BS->ExitBootServices(image_handle, map_key);
         if (EFI_ERROR(status)) {
-            /* Cannot print — boot services gone */
+            /* Cannot print — boot services are unavailable after EBS failure. */
             return status;
         }
     }

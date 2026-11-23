@@ -20,9 +20,13 @@ OVMF := /usr/share/ovmf/OVMF.fd
 
 OBJS := build/main.o build/console.o build/file.o build/linux_boot.o
 
-.PHONY: all run clean
+.PHONY: all rootfs run clean
 
 all: build/BOOTX64.EFI
+
+# Build a full Alpine userspace (login prompt + apk) into the ESP.
+rootfs:
+	@sh scripts/make_rootfs.sh
 
 build/%.o: src/%.c
 	@mkdir -p build
@@ -37,14 +41,17 @@ build/BOOTX64.EFI: build/loader.so
 		-j .dynsym -j .rel -j .rela -j .reloc \
 		$< $@
 
-run: all
+run: all rootfs
 	@mkdir -p $(ESP)/EFI/BOOT
 	cp build/BOOTX64.EFI $(ESP)/EFI/BOOT/BOOTX64.EFI
 	qemu-system-x86_64 \
 		-bios $(OVMF) \
 		-drive file=fat:rw:$(ESP),format=raw \
-		-m 1024M -net none -no-reboot \
-		-serial stdio
+		-m 1024M -no-reboot \
+		-netdev user,id=net0 \
+		-device virtio-net-pci,netdev=net0 \
+		-serial stdio \
+		-serial tcp:0.0.0.0:4444,server,nowait
 
 clean:
 	rm -rf build $(ESP)/EFI/BOOT/BOOTX64.EFI
