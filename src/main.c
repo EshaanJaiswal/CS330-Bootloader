@@ -4,7 +4,7 @@
 #include "file.h"
 #include "linux_boot.h"
 
-#define MAX_MENU_ENTRIES 3
+#define MAX_MENU_ENTRIES 2
 
 typedef struct {
     CHAR16 *title;
@@ -16,22 +16,14 @@ typedef struct {
  * The ESP contains a full Alpine minirootfs (built by scripts/make_rootfs.sh)
  * as alpine-rootfs.cpio.gz.  Stock initramfs-virt is only a bootstrap image
  * that expects a separate ISO/squashfs root, so it is not used here.
- * rdinit=/sbin/init starts BusyBox init, which spawns a getty on ttyS0.
- *
- * ttyS0 is last so it becomes /dev/console: kernel output and the login prompt
- * work normally on the serial terminal, while tty0 remains available for a
- * graphical terminal.
+ * rdinit=/sbin/init starts BusyBox init. ttyS0 is last so it becomes
+ * /dev/console; tty0 remains available for the graphical terminal.
  */
 static BootEntry menu_entries[MAX_MENU_ENTRIES] = {
     {
         L"Alpine Linux (Full userspace)",
         L"Boot Alpine with a serial login prompt and working apk",
         (CHAR8 *)"console=tty0 console=ttyS0 rdinit=/sbin/init video=efifb"
-    },
-    {
-        L"Alpine Linux (Debug)",
-        L"Boot Alpine with kernel debug logging enabled",
-        (CHAR8 *)"console=tty0 console=ttyS0 rdinit=/sbin/init debug video=efifb"
     },
     {
         L"Reboot System",
@@ -128,7 +120,7 @@ efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
     Print(L"\n[Bootloader] Selected: %s\n\n", menu_entries[choice].title);
     console_set_color(COLOR_NORMAL);
 
-    if (choice == 2) {
+    if (choice == 1) {
         Print(L"Resetting system via RT->ResetSystem...\n");
         BS->Stall(1000000);
         RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);

@@ -40,7 +40,21 @@ make
 make run
 ```
 
-The QEMU invocation uses serial console output (`-serial stdio`) for kernel message visibility.
+The QEMU invocation uses serial console output (`-serial stdio`) for kernel
+message visibility. The boot menu currently starts a live Alpine userspace;
+it does not install Alpine or persist changes to disk.
+
+## USB Boot
+
+Create a FAT32 USB partition, copy `build/BOOTX64.EFI` to
+`EFI/BOOT/BOOTX64.EFI`, and copy these files to the partition root:
+
+- `vmlinuz-virt`
+- `alpine-rootfs.cpio.gz`
+
+Boot the USB from a 64-bit UEFI firmware menu. A serial terminal receives
+kernel output and the login prompt; a QEMU or EFI-capable framebuffer receives
+the graphical Alpine console. This supports live boot only.
 
 ## Project Structure
 

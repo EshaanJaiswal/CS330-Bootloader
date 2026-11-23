@@ -50,8 +50,7 @@ run: all rootfs
 		-m 1024M -no-reboot \
 		-netdev user,id=net0 \
 		-device virtio-net-pci,netdev=net0 \
-		-serial stdio \
-		-serial tcp:0.0.0.0:4444,server,nowait
+		-serial stdio
 
 clean:
 	rm -rf build $(ESP)/EFI/BOOT/BOOTX64.EFI

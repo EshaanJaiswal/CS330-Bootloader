@@ -60,21 +60,25 @@ ttyS1::respawn:/sbin/getty -L 115200 ttyS1 vt100
 ::shutdown:/bin/umount -a -r
 EOF
 
-# Bring up QEMU's user-mode NIC with a static address so `apk add` works.
+# Bring up ethernet with DHCP, falling back to QEMU's documented static
+# addressing when DHCP is unavailable.
 cat > "$ROOTFS/sbin/cs330-net.sh" <<'EOF'
 #!/bin/sh
-# This kernel has no AF_PACKET support, so BusyBox udhcpc cannot run.  Use the
-# fixed addresses that QEMU user-mode networking assigns by default.
 modprobe virtio_net 2>/dev/null
 for i in 1 2 3 4 5 6 7 8 9 10; do
-    if ip link show eth0 >/dev/null 2>&1; then
-        ip link set eth0 up 2>/dev/null
-        ip addr add 10.0.2.15/24 dev eth0 2>/dev/null
-        ip route add default via 10.0.2.2 2>/dev/null
-        exit 0
-    fi
+    ip link show eth0 >/dev/null 2>&1 && break
     sleep 1
 done
+
+ip link set eth0 up 2>/dev/null || exit 0
+
+if udhcpc -b -i eth0 -q >/dev/null 2>&1; then
+    exit 0
+fi
+
+# Fallback for QEMU user-networking and networks without DHCP.
+ip addr add 10.0.2.15/24 dev eth0 2>/dev/null
+ip route add default via 10.0.2.2 2>/dev/null
 EOF
 chmod +x "$ROOTFS/sbin/cs330-net.sh"
 
